@@ -1,0 +1,6 @@
+{
+  "name":"clec-public-data",
+  "compatibility_date":"2026-10-01",
+  "workers_dev":true,
+  "assets":{"directory":"./assets","html_handling":"none","not_found_handling":"none"}
+}

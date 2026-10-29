@@ -1,0 +1,8 @@
+/*
+  Access-Control-Allow-Origin: https://clec-net-assets.web.app
+  Access-Control-Expose-Headers: ETag
+  X-Content-Type-Options: nosniff
+/manifest.json
+  Cache-Control: public,max-age=300,must-revalidate
+/v1/distribution/*
+  Cache-Control: public,max-age=31536000,immutable

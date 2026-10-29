@@ -1,0 +1,7 @@
+{
+  "name":"clec-public-data",
+  "private":true,
+  "type":"module",
+  "engines":{"node":">=24"},
+  "scripts":{"update":"node scripts/update.mjs --fetch","verify":"node scripts/verify.mjs"}
+}
