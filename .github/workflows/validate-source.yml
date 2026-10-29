@@ -1,0 +1,37 @@
+name: Validate public source
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: One bounded official query
+        run: |
+          node --input-type=module <<'JS'
+          import {parsePeriod} from './lib/source.mjs';
+          const url='https://www.tdcc.com.tw/portal/zh/smWeb/qryStock';
+          let cookies='';
+          async function read(body){
+            const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),20000);
+            try{
+              const r=await fetch(url,{method:body?'POST':'GET',headers:{...(body?{'Content-Type':'application/x-www-form-urlencoded',Referer:url}:{}),...(cookies?{Cookie:cookies}:{})},body,signal:controller.signal});
+              if(!r.ok)throw Error('Official HTTP '+r.status+'; stopped without retry');
+              const lines=r.headers.getSetCookie();if(lines.length)cookies=lines.map(s=>s.split(';')[0]).join('; ');
+              return await r.text();
+            }finally{clearTimeout(timer)}
+          }
+          const first=await read(),date=[...first.matchAll(/<option value="(\d{8})"/g)].map(m=>m[1]).sort().at(-1),token=first.match(/name="SYNCHRONIZER_TOKEN" value="([^"]+)/)?.[1];
+          if(!date||!token)throw Error('Official form unavailable');
+          await new Promise(r=>setTimeout(r,1100));
+          const result=await read(new URLSearchParams({SYNCHRONIZER_TOKEN:token,SYNCHRONIZER_URI:'/portal/zh/smWeb/qryStock',method:'submit',firDate:date,scaDate:date,sqlMethod:'StockNo',stockNo:'00662',stockName:''}));
+          const iso=date.slice(0,4)+'-'+date.slice(4,6)+'-'+date.slice(6),period=parsePeriod(result,'00662',iso);
+          if(!period)throw Error('Latest period has no data');
+          console.log(JSON.stringify({source:'TDCC',symbol:'00662',date:iso,groups:period.groups.length,holderSumVerified:true,requests:2}));
+          JS
