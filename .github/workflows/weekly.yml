@@ -84,7 +84,19 @@ jobs:
           const files=['manifest.json',...manifest.items.map(i=>'v1/distribution/'+i.symbol+'/'+i.version+'.json')];
           const catalog=await fs.readFile('assets/distribution-catalog.json').catch(e=>{if(e.code!=='ENOENT')throw e;return null;});
           if(catalog)files.push('distribution-catalog.json');
-          for(const file of files){const r=await fetch(base.replace(/\/$/,'')+'/'+file,{cache:'no-cache'});if(!r.ok)throw Error('Published resource unavailable');const remote=Buffer.from(await r.arrayBuffer()),local=await fs.readFile('assets/'+file);if(!remote.equals(local))throw Error('Published bytes mismatch');}
+          for(const file of files){
+            const url=new URL(file,base.replace(/\/$/,'')+'/');
+            const local=await fs.readFile('assets/'+file);
+            if(!file.startsWith('v1/'))url.searchParams.set('release',createHash('sha256').update(local).digest('hex'));
+            let matches=false;
+            for(let attempt=0;attempt<4&&!matches;attempt++){
+              if(attempt)await new Promise(resolve=>setTimeout(resolve,5000*attempt));
+              const remote=await fetch(url,{cache:'no-cache',signal:AbortSignal.timeout(15000)})
+                .then(async r=>r.ok?Buffer.from(await r.arrayBuffer()):null).catch(()=>null);
+              matches=remote?.equals(local)??false;
+            }
+            if(!matches)throw Error('Published bytes unavailable or mismatched: '+file);
+          }
           await fs.writeFile('.state/published.json',JSON.stringify({version:manifest.version,catalog:catalog?createHash('sha256').update(catalog).digest('hex'):null,at:new Date().toISOString()}));
           JS
       - name: Preserve public progress and accepted data
