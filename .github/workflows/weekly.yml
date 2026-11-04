@@ -2,7 +2,14 @@ name: Public distribution data
 on:
   schedule:
     - cron: '0 2 * * 1,6'
+    - cron: '17 * * * *'
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Distribution task
+        type: choice
+        options: [weekly, backfill]
+        default: weekly
 permissions:
   contents: write
 concurrency:
@@ -10,7 +17,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   update:
-    if: github.ref == 'refs/heads/main' && vars.PUBLIC_DATA_ENABLED == 'true'
+    if: github.ref == 'refs/heads/main' && vars.PUBLIC_DATA_ENABLED == 'true' && (github.event.schedule != '17 * * * *' || (vars.HISTORY_APPROVED == 'true' && vars.BACKFILL_QUEUE_URL != ''))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -18,8 +25,27 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Update recent four periods
-        run: node scripts/update.mjs --fetch
+      - name: Refresh or backfill one bounded round
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          MODE: ${{ inputs.mode }}
+          HISTORY_APPROVED: ${{ vars.HISTORY_APPROVED }}
+          BACKFILL_QUEUE_URL: ${{ vars.BACKFILL_QUEUE_URL }}
+          BACKFILL_JOB_TOKEN: ${{ secrets.BACKFILL_JOB_TOKEN }}
+        run: |
+          if [ "$MODE" = backfill ]; then
+            if [ "$HISTORY_APPROVED" != true ] || [ -z "$BACKFILL_QUEUE_URL" ]; then
+              echo 'Backfill is not enabled'
+              exit 1
+            fi
+            node scripts/backfill.mjs --fetch
+          elif [ "$SCHEDULE" != '17 * * * *' ]; then
+            node scripts/update.mjs --fetch
+          elif [ "$(node -p 'Boolean(require("./.state/checkpoint.json").activeCycle)')" = true ]; then
+            node scripts/update.mjs --fetch --resume
+          elif [ "$HISTORY_APPROVED" = true ] && [ -n "$BACKFILL_QUEUE_URL" ]; then
+            node scripts/backfill.mjs --fetch
+          fi
       - name: Validate public assets
         run: node scripts/verify.mjs
       - name: Determine publication
@@ -27,9 +53,11 @@ jobs:
         run: |
           node --input-type=module <<'JS'
           import fs from 'node:fs';
+          import {createHash} from 'node:crypto';
           const manifest=JSON.parse(fs.readFileSync('assets/manifest.json'));
-          let previous='';try{previous=JSON.parse(fs.readFileSync('.state/published.json')).version}catch{}
-          fs.appendFileSync(process.env.GITHUB_OUTPUT,'needed='+(manifest.version!==previous)+'\n');
+          let previous={};try{previous=JSON.parse(fs.readFileSync('.state/published.json'))}catch{}
+          const catalog=fs.existsSync('assets/distribution-catalog.json')?createHash('sha256').update(fs.readFileSync('assets/distribution-catalog.json')).digest('hex'):null;
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,'needed='+(manifest.version!==previous.version||catalog!==(previous.catalog??null))+'\n');
           JS
       - name: Publish static assets only
         if: steps.publication.outputs.needed == 'true'
@@ -54,8 +82,10 @@ jobs:
           const base=process.env.PUBLIC_DATA_URL;if(!base?.startsWith('https://'))throw Error('PUBLIC_DATA_URL required');
           const manifest=JSON.parse(await fs.readFile('assets/manifest.json','utf8'));
           const files=['manifest.json',...manifest.items.map(i=>'v1/distribution/'+i.symbol+'/'+i.version+'.json')];
+          const catalog=await fs.readFile('assets/distribution-catalog.json').catch(e=>{if(e.code!=='ENOENT')throw e;return null;});
+          if(catalog)files.push('distribution-catalog.json');
           for(const file of files){const r=await fetch(base.replace(/\/$/,'')+'/'+file,{cache:'no-cache'});if(!r.ok)throw Error('Published resource unavailable');const remote=Buffer.from(await r.arrayBuffer()),local=await fs.readFile('assets/'+file);if(!remote.equals(local))throw Error('Published bytes mismatch');}
-          await fs.writeFile('.state/published.json',JSON.stringify({version:manifest.version,at:new Date().toISOString()}));
+          await fs.writeFile('.state/published.json',JSON.stringify({version:manifest.version,catalog:catalog?createHash('sha256').update(catalog).digest('hex'):null,at:new Date().toISOString()}));
           JS
       - name: Preserve public progress and accepted data
         if: always()
@@ -67,3 +97,9 @@ jobs:
             git commit -m 'Update public distribution data and progress'
             git push
           fi
+      - name: Acknowledge completed work after readback and checkpoint
+        if: success() && vars.HISTORY_APPROVED == 'true' && vars.BACKFILL_QUEUE_URL != ''
+        env:
+          BACKFILL_QUEUE_URL: ${{ vars.BACKFILL_QUEUE_URL }}
+          BACKFILL_JOB_TOKEN: ${{ secrets.BACKFILL_JOB_TOKEN }}
+        run: node scripts/backfill.mjs --ack
